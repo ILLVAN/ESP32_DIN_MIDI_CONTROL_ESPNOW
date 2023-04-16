@@ -13,4 +13,5 @@ WORK IN PROGRESS
 It's public for easily being able to talk about it with others, not because its done.
 ESP 3 is working well already, prototype soldered with 3 buttons, handling MIDI clock and controlling delay and looper functions via MIDI CC with different button press combinations. 
 It can receive controls via ESPNOW. Right now, it only receives looper level from ESP2 and forwards it as MIDI CC.
+ESP 3 sends cycle and control information to ESP 2 via ESPNOW for displaying values
 If you have suggestions or questions feel free to contact.
