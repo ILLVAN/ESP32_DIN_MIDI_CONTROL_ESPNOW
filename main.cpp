@@ -8,6 +8,8 @@ ESP 3: small MIDI I/O BOX AT TIMELINE, delay / loop control
 #include <WiFi.h>
 #include <esp_now.h>
 #include <ezButton.h>
+#include <Adafruit_NeoPixel.h>
+#include "AiEsp32RotaryEncoder.h"
 #include <protocol2copy.h> // defines ESPNOW message struct
 
 #define DEBOUNCE_TIME 50 // the debounce time in millisecond, increase this time if it still chatters
@@ -19,8 +21,20 @@ ESP 3: small MIDI I/O BOX AT TIMELINE, delay / loop control
 #define BLUE 32
 #define GREEN 33
 #define RED 25
+#define LEDRING 23
+
+#define LEDRING 23
+#define ROTARY_ENCODER_A_PIN 35
+#define ROTARY_ENCODER_B_PIN 34
+#define ROTARY_ENCODER_BUTTON_PIN 14
+#define ROTARY_ENCODER_VCC_PIN -1
+#define ROTARY_ENCODER_startpos 110
+
+#define ROTARY_ENCODER_STEPS 4
+#define NUMPIXELS 12
 
 #define BOARD_ID 3
+#define NUMPIXELS 12
 
 ezButton button1(BUTTON_1); 
 ezButton button2(BUTTON_2); 
@@ -32,6 +46,9 @@ struct_message nowMessageSend;
 struct_message nowMessageRecv;
 esp_now_peer_info_t peerInfo;
 
+
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, LEDRING, NEO_GRB + NEO_KHZ800);
+AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(ROTARY_ENCODER_A_PIN, ROTARY_ENCODER_B_PIN, ROTARY_ENCODER_BUTTON_PIN, ROTARY_ENCODER_VCC_PIN, ROTARY_ENCODER_STEPS);
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, MIDI);
 
 const byte midi_clock = 0xF8;
@@ -47,7 +64,7 @@ volatile uint8_t sendBeatCount = 0;
 volatile uint8_t barCount = 1;
 
 volatile uint8_t source;
-volatile uint8_t loopVolume;
+volatile uint8_t loopVolume = ROTARY_ENCODER_startpos;  
 
 volatile boolean butflag_1 = false;
 volatile boolean butflag_2 = false;
@@ -55,6 +72,7 @@ volatile boolean butflag_3 = false;
 volatile boolean butState_1 = false;
 volatile boolean midiClockToggle = true;
 volatile boolean stopClock = true;
+volatile uint8_t encoderClickToggle;
 
 
 volatile uint8_t loopReqState = 0;
@@ -64,7 +82,16 @@ volatile uint16_t timelineCycleState[2];
 volatile uint16_t alive; 
 volatile boolean aliveFlag;
 
-volatile int i,j;                        
+volatile int i,j;        
+
+void stopLoop(){
+    loopReqState = 0; // Request Stop is now done immediately, no more state 3
+    loopState = 0;
+    MIDI.sendControlChange(85, 100, 10);
+    digitalWrite(BLUE, LOW); 
+    digitalWrite(GREEN, LOW);
+    digitalWrite(RED, LOW);
+}
 
 void IRAM_ATTR onTimer(){
   alive++;
@@ -76,6 +103,11 @@ void IRAM_ATTR onTimer(){
    incomingByte = MIDI.getType(); 
    switch (incomingByte){
       case midi_start:
+            if (loopState == 2){
+              MIDI.sendControlChange(86, 100, 10); // send play again if already playing
+              loopState = 20; // Restart playing
+              loopReqState = 2;
+            }
             stopClock = false;
             aliveFlag = false;
             beatCount = 1;
@@ -152,6 +184,9 @@ void IRAM_ATTR onTimer(){
                       digitalWrite(GREEN, LOW);                
                       break;
                   case 96:
+                      if (loopState == 20 && barCount < 5){ // PLAY RESTART RESYNC
+                          MIDI.sendControlChange(86, 100, 10);
+                      }    
                       sendBeatCount = 1;
                       barCount++;
                       if ((loopState == 1 && loopReqState < 2) || loopReqState == 4){
@@ -170,7 +205,7 @@ void IRAM_ATTR onTimer(){
                           loopState = 1;
                           loopReqState = 0;
                         }
-                        else if (loopReqState == 2 && loopState != 2){ // PLAY
+                        else if (loopReqState == 2){ // PLAY
                           MIDI.sendControlChange(86, 100, 10);
                           loopState = 2;
                           loopReqState = 0;
@@ -246,6 +281,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) { 
+  Serial.println("Received Message");
   memcpy(&nowMessageRecv, incomingData, sizeof(nowMessageRecv));
   if (nowMessageRecv.sourceID == 2){
     if (nowMessageRecv.messageType & LOOP_LEVEL){
@@ -259,43 +295,82 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   } 
 }
 
-void setup() {
-  pinMode(LED,OUTPUT);
-  pinMode(RED, OUTPUT);
-  pinMode(GREEN, OUTPUT);
-  pinMode(BLUE, OUTPUT);
-  button1.setDebounceTime(DEBOUNCE_TIME); 
-  button2.setDebounceTime(DEBOUNCE_TIME); 
-  button3.setDebounceTime(DEBOUNCE_TIME); 
-  Serial.begin(115200);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
+void sendOwnState(){
+  if (stopClock && alive < 2 && !aliveFlag){
+    aliveFlag = true;
+    timelineControlState = 1; // alive
+    Serial.println(timelineControlState);
+    Serial.println("alive");
+    if (loopReqState == 2){
+      timelineControlState |= (1 << 4); // PLAY REQ
+      Serial.println(timelineControlState);
+      Serial.println("PLAY REQ");
+    }     
+    if (loopReqState == 1){
+      timelineControlState |= (1 << 6); // REC REQ
+      Serial.println(timelineControlState);
+      Serial.println("REC REQ");
+    } 
+    if (loopReqState == 4){
+      timelineControlState |= (1 << 7); // UNDO REQ
+      Serial.println(timelineControlState);
+      Serial.println("UNDO REQ");
+    }
+    nowMessageSend.sourceID = BOARD_ID;
+    nowMessageSend.destinationID = 0; // Broadcast
+    nowMessageSend.messageType = TIMELINE_CONTROL_STATE; 
+    nowMessageSend.sendTimelineCycleState[0] = 0;
+    nowMessageSend.sendTimelineCycleState[1] = 0;
+    nowMessageSend.sendTimelineControlState = timelineControlState;
+    esp_now_send(0, (uint8_t *) &nowMessageSend, sizeof(nowMessageSend));
   }
-  esp_now_register_send_cb(OnDataSent);
-  esp_now_register_recv_cb(OnDataRecv);
-  memcpy(peerInfo.peer_addr, MAC_ESP2, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
-    return;
-  }
-  MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, MIDI);
-  MIDI.begin(MIDI_CHANNEL_OFF);
-  MIDI_watchr = timerBegin(0, 80, true); 
-  timerAttachInterrupt(MIDI_watchr, &onTimer, true);
-  timerAlarmWrite(MIDI_watchr, 1000, true); 
-  timerAlarmEnable(MIDI_watchr);
 }
 
-void loop() {
-  button1.loop();
-  button2.loop();
-  button3.loop();
+void showLEDRingVolume(){  
+  if (loopVolume > 0 ){
+    for (uint8_t i = 0; i <= loopVolume / 11; i++){
+      pixels.setPixelColor(i, pixels.Color(1.5*loopVolume, loopVolume/(i+1),255-2*loopVolume));
+      pixels.show();
+    }
+  }
+  if (loopVolume < 127){
+    for (uint8_t i = loopVolume / 11; i < NUMPIXELS; i++){       
+      pixels.setPixelColor(i, pixels.Color(0,0,0));
+      pixels.show();
+    }
+  }
+
+}
+
+void rotary_onButtonClick(){    
+  if (encoderClickToggle % 2){
+    loopReqState = 2; // Request Play
+    digitalWrite(BLUE, HIGH);
+  }
+  else{
+    stopLoop();
+  }
+  encoderClickToggle++;
+  Serial.print("button pressed ");
+}
+
+void rotary_loop(){
+    if (rotaryEncoder.encoderChanged()){
+            loopVolume = rotaryEncoder.readEncoder();
+            MIDI.sendControlChange(98, loopVolume, 10);
+            Serial.print("loop volume: ");
+            Serial.println(loopVolume);
+    }
+    if (rotaryEncoder.isEncoderButtonClicked()){
+            rotary_onButtonClick();
+    }
+}
+
+void IRAM_ATTR readEncoderISR(){
+    rotaryEncoder.readEncoder_ISR();
+}
+
+void checkButtons(){
   if (button1.isPressed() && butflag_1 == false){
     Serial.println ("Button 1 pressed");
     digitalWrite(GREEN, HIGH);
@@ -368,12 +443,7 @@ void loop() {
   if (butflag_2 && button3.isPressed()){
     butflag_3 = true;
     Serial.println ("Button 2&..3 pressed: STOP");
-    loopReqState = 0; // Request Stop is now done immediately, no more state 3
-    loopState = 0;
-    MIDI.sendControlChange(85, 100, 10);
-    digitalWrite(BLUE, LOW); 
-    digitalWrite(GREEN, LOW);
-    digitalWrite(RED, LOW);
+    stopLoop();
   }
   else if (butflag_3 && button2.isPressed()){
     butflag_2 = true;
@@ -383,33 +453,57 @@ void loop() {
     digitalWrite(GREEN, HIGH);
     digitalWrite(RED, HIGH);
   }
-  if (stopClock && alive < 2 && !aliveFlag){
-    aliveFlag = true;
-    timelineControlState = 1; // alive
-    Serial.println(timelineControlState);
-    Serial.println("alive");
-    if (loopReqState == 2){
-      timelineControlState |= (1 << 4); // PLAY REQ
-      Serial.println(timelineControlState);
-      Serial.println("PLAY REQ");
-    }     
-    if (loopReqState == 1){
-      timelineControlState |= (1 << 6); // REC REQ
-      Serial.println(timelineControlState);
-      Serial.println("REC REQ");
-    } 
-    if (loopReqState == 4){
-      timelineControlState |= (1 << 7); // UNDO REQ
-      Serial.println(timelineControlState);
-      Serial.println("UNDO REQ");
-    }
-    nowMessageSend.sourceID = BOARD_ID;
-    nowMessageSend.destinationID = 0; // Broadcast
-    nowMessageSend.messageType = TIMELINE_CONTROL_STATE; 
-    nowMessageSend.sendTimelineCycleState[0] = 0;
-    nowMessageSend.sendTimelineCycleState[1] = 0;
-    nowMessageSend.sendTimelineControlState = timelineControlState;
-    esp_now_send(0, (uint8_t *) &nowMessageSend, sizeof(nowMessageSend));
+}
+
+void setup() {
+  pinMode(LED,OUTPUT);
+  pinMode(RED, OUTPUT);
+  pinMode(GREEN, OUTPUT);
+  pinMode(BLUE, OUTPUT);
+  button1.setDebounceTime(DEBOUNCE_TIME); 
+  button2.setDebounceTime(DEBOUNCE_TIME); 
+  button3.setDebounceTime(DEBOUNCE_TIME); 
+  Serial.begin(115200);
+  pixels.begin();
+  rotaryEncoder.begin();
+  rotaryEncoder.setup(readEncoderISR);
+  bool circleValues = false;
+  rotaryEncoder.setBoundaries(0, 127, circleValues); //minValue, maxValue, circleValues true|false 
+  //rotaryEncoder.disableAcceleration(); //acceleration is now enabled by default - disable if you dont need it
+  rotaryEncoder.setAcceleration(250); //or set the value - larger number = more accelearation; 0 or 1 means disabled acceleration
+  rotaryEncoder.setEncoderValue(ROTARY_ENCODER_startpos);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
   }
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+  memcpy(peerInfo.peer_addr, MAC_ESP2, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Failed to add peer");
+    return;
+  }
+  MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, MIDI);
+  MIDI.begin(MIDI_CHANNEL_OFF);
+  MIDI_watchr = timerBegin(0, 80, true); 
+  timerAttachInterrupt(MIDI_watchr, &onTimer, true);
+  timerAlarmWrite(MIDI_watchr, 1000, true); 
+  timerAlarmEnable(MIDI_watchr);
+  showLEDRingVolume();
+}
+
+void loop() {
+  button1.loop();
+  button2.loop();
+  button3.loop();
+  rotary_loop();
+  showLEDRingVolume();
+  checkButtons();
+  sendOwnState();
 }
 
