@@ -1,6 +1,8 @@
 /*
 ESP 3: small MIDI I/O BOX AT TIMELINE, delay / loop control
 
+Silvan Weber, 2022
+
 */
 
 #include <Arduino.h>
